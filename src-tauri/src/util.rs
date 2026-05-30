@@ -191,25 +191,19 @@ pub(crate) fn get_preset_launch_profiles() -> Vec<LaunchProfile> {
     #[cfg(target_os = "linux")]
     {
         // Find Proton installs
-        if let Some(steam_compat_client_install_path) = protontools::get_steam_client_path() {
-            for proton_install in protontools::find_all_proton_installs() {
-                let proton_path = proton_install.get_exe_path();
-                let profile_name = proton_path
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap();
+        for proton_install in protontools::find_all_proton_installs() {
+            let proton_path = proton_install.get_exe_path();
+            let profile_name = proton_path
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap();
 
-                profiles.push(LaunchProfile::new(
-                    &profile_name,
-                    &format!(
-                        "STEAM_COMPAT_CLIENT_INSTALL_PATH=\"{}\" \"{}\" run {{}}",
-                        steam_compat_client_install_path.to_string_lossy(),
-                        proton_path.to_string_lossy()
-                    ),
-                    true,
-                ));
-            }
+            profiles.push(LaunchProfile::new(
+                &profile_name,
+                &format!("\"{}\" run {{}}", proton_path.to_string_lossy()),
+                true,
+            ));
         }
     }
 

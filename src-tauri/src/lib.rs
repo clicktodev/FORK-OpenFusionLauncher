@@ -671,7 +671,7 @@ async fn prep_launch(
 
         #[cfg(not(target_os = "windows"))]
         {
-            // Prefix setup
+            // Compat setup
             let mut compat_data_dir = util::get_compat_data_dir(&cmd);
             if compat_data_dir.is_none() {
                 // not specified; use launcher compat data dir
@@ -679,11 +679,26 @@ async fn prep_launch(
                 launcher_compat_dir.push(profile.get_id().to_string());
 
                 if cmd.get_program().to_string_lossy().ends_with("proton") {
-                    cmd.env(
-                        "STEAM_COMPAT_DATA_PATH",
-                        launcher_compat_dir.to_string_lossy().to_string(),
-                    );
-                    // proton sets WINEPREFIX internally
+                    #[cfg(target_os = "linux")]
+                    {
+                        if let Some(steam_client_dir) = protontools::get_steam_client_path() {
+                            cmd.env(
+                                "STEAM_COMPAT_CLIENT_INSTALL_PATH",
+                                steam_client_dir.to_string_lossy().to_string(),
+                            );
+                        } else {
+                            return Err("Proton requires Steam to be installed".into());
+                        }
+
+                        cmd.env(
+                            "STEAM_COMPAT_DATA_PATH",
+                            launcher_compat_dir.to_string_lossy().to_string(),
+                        );
+                        // proton sets WINEPREFIX internally
+                    }
+
+                    #[cfg(not(target_os = "linux"))]
+                    return Err("Proton is only supported on Linux".into());
                 } else {
                     // assume wine
                     cmd.env(

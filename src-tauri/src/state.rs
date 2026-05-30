@@ -1,7 +1,13 @@
-use std::{collections::HashMap, path::PathBuf, process::Command, sync::OnceLock};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    process::Command,
+    sync::{LazyLock, OnceLock},
+};
 
 use ffbuildtool::Version;
 use log::*;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, path::BaseDirectory};
 use tokio::task::JoinHandle;
@@ -705,7 +711,8 @@ impl LaunchProfiles {
     fn load(config: &mut Config) -> Self {
         const CUSTOM_PROFILE_NAME: &str = "Custom Profile";
         let profiles = match Self::load_internal() {
-            Ok(profiles) => {
+            Ok(mut profiles) => {
+                profiles = Self::apply_migrations(profiles);
                 info!(
                     "Loaded {} launch profiles from app data",
                     profiles.profiles.len()
@@ -745,6 +752,32 @@ impl LaunchProfiles {
         let commands_str = std::fs::read_to_string(commands_path)?;
         let commands: Self = serde_json::from_str(&commands_str)?;
         Ok(commands)
+    }
+
+    fn apply_migrations(mut loaded: LaunchProfiles) -> LaunchProfiles {
+        // Strip `STEAM_COMPAT_CLIENT_INSTALL_PATH` env var from all presets;
+        // it's set at runtime now as part of compat setup.
+        static STEAM_COMPAT_REMOVAL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r#"\s*STEAM_COMPAT_CLIENT_INSTALL_PATH="[^"]*"\s*"#).unwrap()
+        });
+
+        for profile in &mut loaded.profiles {
+            if profile.is_preset() {
+                let new_command = STEAM_COMPAT_REMOVAL_REGEX
+                    .replace_all(&profile.command, " ")
+                    .trim()
+                    .to_string();
+                if new_command != profile.command {
+                    debug!(
+                        "Migrating launch profile {}: stripping STEAM_COMPAT_CLIENT_INSTALL_PATH",
+                        profile.get_id()
+                    );
+                    profile.command = new_command;
+                }
+            }
+        }
+
+        loaded
     }
 
     fn load_presets() -> Self {
