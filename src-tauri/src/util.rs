@@ -505,9 +505,14 @@ pub(crate) fn gen_launch_command(base_cmd: Command, launch_fmt: &str) -> Result<
         base_command_str.push_str(arg.to_string_lossy().to_string().as_str());
     }
 
+    let mut launch_command_str = launch_fmt.to_string();
+
+    // Replace newlines with spaces
+    launch_command_str = launch_command_str.replace("\r\n", " ");
+    launch_command_str = launch_command_str.replace("\n", " ");
+
     // Substitute the base command + environment variables in the replacement tokens into the launch format string.
     let mut base_replaced = false;
-    let mut launch_command_str = launch_fmt.to_string();
     while let Some(start) = launch_command_str.find(REPLACEMENT_TOKEN_LEFT) {
         if let Some(end) = launch_command_str[start..].find(REPLACEMENT_TOKEN_RIGHT) {
             let replacement_identifier =
