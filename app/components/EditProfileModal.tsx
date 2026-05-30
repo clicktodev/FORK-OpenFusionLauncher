@@ -85,7 +85,7 @@ export default function EditProfileModal({
               disabled={isPreset}
             />
             <Form.Text className="text-muted">
-              Use <code>{"{}"}</code> as a placeholder for the game executable.
+              Use <code>{"{}"}</code> as a placeholder for the game executable and <code>{"{ENV_VAR_NAME}"}</code> to expand environment variables.
             </Form.Text>
           </Form.Group>
         </Form>

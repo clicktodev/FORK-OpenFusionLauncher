@@ -667,7 +667,7 @@ async fn prep_launch(
             ))?;
 
         let launch_fmt = profile.get_command();
-        cmd = util::gen_launch_command(cmd, launch_fmt);
+        cmd = util::gen_launch_command(cmd, launch_fmt)?;
 
         #[cfg(not(target_os = "windows"))]
         {

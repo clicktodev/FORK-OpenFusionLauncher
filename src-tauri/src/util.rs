@@ -500,21 +500,60 @@ fn extract_env_vars_from_tokens(tokens: &mut Vec<String>) -> HashMap<String, Str
     env_vars
 }
 
-pub(crate) fn gen_launch_command(base_cmd: Command, launch_fmt: &str) -> Command {
-    const REPLACEMENT_TOKEN: &str = "{}";
+pub(crate) fn gen_launch_command(base_cmd: Command, launch_fmt: &str) -> Result<Command> {
+    const REPLACEMENT_TOKEN_LEFT: &str = "{";
+    const REPLACEMENT_TOKEN_RIGHT: &str = "}";
 
+    // Prepare the ffrunner portion of the command for tokenization.
     let mut base_command_str = format!("\"{}\"", base_cmd.get_program().to_string_lossy());
     for arg in base_cmd.get_args() {
         base_command_str.push(' ');
         base_command_str.push_str(arg.to_string_lossy().to_string().as_str());
     }
 
-    let launch_command_str = launch_fmt.replace(REPLACEMENT_TOKEN, &base_command_str);
+    // Substitute the base command + environment variables in the replacement tokens into the launch format string.
+    let mut base_replaced = false;
+    let mut launch_command_str = launch_fmt.to_string();
+    while let Some(start) = launch_command_str.find(REPLACEMENT_TOKEN_LEFT) {
+        if let Some(end) = launch_command_str[start..].find(REPLACEMENT_TOKEN_RIGHT) {
+            let replacement_identifier =
+                &launch_command_str[start + REPLACEMENT_TOKEN_LEFT.len()..start + end];
+            let replacement_value = if replacement_identifier.is_empty() {
+                base_replaced = true;
+                base_command_str.clone()
+            } else {
+                env::var(replacement_identifier).map_err(|_| {
+                    format!("Environment variable {} not set", replacement_identifier)
+                })?
+            };
+
+            launch_command_str.replace_range(
+                start..start + end + REPLACEMENT_TOKEN_RIGHT.len(),
+                &replacement_value,
+            );
+        } else {
+            break;
+        }
+    }
+
+    if !base_replaced {
+        return Err(format!(
+            "Invalid launch format string: missing {}{}",
+            REPLACEMENT_TOKEN_LEFT, REPLACEMENT_TOKEN_RIGHT
+        )
+        .into());
+    }
+
+    // Tokenize and insert env vars into the env for the command
     let mut launch_command_tokens = tokenize_launch_command(&launch_command_str);
     let user_env_vars = extract_env_vars_from_tokens(&mut launch_command_tokens);
 
     let mut launch_command = Command::new(&launch_command_tokens[0]);
-    launch_command.current_dir(base_cmd.get_current_dir().unwrap());
+    launch_command.current_dir(
+        base_cmd
+            .get_current_dir()
+            .ok_or("Invalid working directory".to_string())?,
+    );
 
     for env in base_cmd.get_envs() {
         launch_command.env(env.0, env.1.unwrap());
@@ -525,7 +564,7 @@ pub(crate) fn gen_launch_command(base_cmd: Command, launch_fmt: &str) -> Command
     }
 
     launch_command.args(&launch_command_tokens[1..]);
-    launch_command
+    Ok(launch_command)
 }
 
 pub(crate) fn get_launch_cmd_dbg_str(command: &Command, with_env: bool) -> String {
