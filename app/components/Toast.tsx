@@ -1,6 +1,6 @@
 import _Toast from "react-bootstrap/Toast";
 import { useState } from "react";
-import { open } from "@tauri-apps/plugin-shell";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { Alert } from "@/app/types";
 import { getHostnameFromLink, variantToLabel } from "@/app/util";
 import Button from "./Button";
@@ -25,7 +25,7 @@ export default function Toast({ alert }: { alert: Alert }) {
         {alert.link && (
           <Button
             className="d-block w-100 mt-2"
-            onClick={() => open(alert.link!)}
+            onClick={() => openUrl(alert.link!)}
             variant="success"
             icon="arrow-up-right-from-square"
             text={getHostnameFromLink(alert.link)}

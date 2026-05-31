@@ -11,7 +11,7 @@ import { EndpointInfo, ServerEntry } from "@/app/types";
 import { validateUsername, validatePassword, validateEmail, getPrivacyPolicyUrlForServer } from "@/app/util";
 import { Overlay, Tooltip } from "react-bootstrap";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-shell";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { parse } from "marked";
 import DOMPurify  from "dompurify";
 import get_seed from "@/app/seed";
@@ -32,7 +32,7 @@ const NO_EMAIL_DISCLAIMER = "Continue without entering an email address? If ther
 
 const replaceLinksWithShellOpen = (html: string) => {
   return html.replace(/<a href="([^"]+)">([^<]+)<\/a>/g, (match, href, text) => {
-    return `<a href="#" onclick="window.__TAURI__.shell.open('${href}'); return false;">${text}</a>`;
+    return `<a href="#" onclick="window.__TAURI__.opener.openUrl('${href}'); return false;">${text}</a>`;
   });
 };
 
@@ -345,7 +345,7 @@ export default function LoginModal({
                     className="text-decoration-underline"
                     onClick={() => {
                       const url = getPrivacyPolicyUrlForServer(server!);
-                      open(url);
+                      openUrl(url);
                     }}
                   >
                     privacy policy

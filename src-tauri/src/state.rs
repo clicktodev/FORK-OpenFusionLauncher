@@ -783,7 +783,8 @@ impl LaunchProfiles {
     }
 
     fn sort(&mut self) {
-        self.profiles.sort_by_key(|p| (!p.is_preset(), p.name.clone()));
+        self.profiles
+            .sort_by_key(|p| (!p.is_preset(), p.name.clone()));
     }
 
     fn load_presets() -> Self {

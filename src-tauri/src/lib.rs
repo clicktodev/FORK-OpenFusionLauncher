@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use state::{
     AppState, Config, FlatServer, FlatServers, Server, ServerInfo, Versions, get_app_statics,
 };
-use tauri_plugin_shell::ShellExt;
+use tauri_plugin_opener::OpenerExt;
 use util::AlertVariant;
 
 use std::{
@@ -1185,7 +1185,9 @@ async fn open_folder_for_version(
         drop(state);
 
         if cache_dir.exists() {
-            app_handle.shell().open(cache_dir.to_str().unwrap(), None)?;
+            app_handle
+                .opener()
+                .open_path(cache_dir.to_str().unwrap(), None::<&str>)?;
         } else {
             return Err("Cache directory does not exist".into());
         }
@@ -1422,7 +1424,7 @@ fn is_debug_mode() -> bool {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if cfg!(debug_assertions) {

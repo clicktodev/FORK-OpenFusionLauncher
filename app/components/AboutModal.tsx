@@ -1,6 +1,6 @@
 import Button from "./Button";
 import { Stack, Modal } from "react-bootstrap";
-import { open } from "@tauri-apps/plugin-shell";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 export default function AboutModal({
   show,
@@ -30,13 +30,13 @@ export default function AboutModal({
       <Modal.Footer className="flex-row-reverse">
         <Stack direction="horizontal" gap={2} className="w-100">
           <Button
-            onClick={() => open("https://github.com/OpenFusionProject/")}
+            onClick={() => openUrl("https://github.com/OpenFusionProject/")}
             variant="primary"
             icon="github fa-brands fa-xl"
             tooltip="Github Page"
           />
           <Button
-            onClick={() => open("https://discord.gg/DYavckB")}
+            onClick={() => openUrl("https://discord.gg/DYavckB")}
             variant="primary"
             icon="discord fa-brands fa-lg"
             tooltip="Discord Chat"

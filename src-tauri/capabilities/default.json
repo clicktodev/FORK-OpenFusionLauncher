@@ -17,7 +17,8 @@
     "core:window:allow-unmaximize",
     "core:window:allow-is-maximized",
     "core:window:allow-close",
-    "shell:allow-open",
+    "opener:default",
+    "opener:allow-open-path",
     "dialog:allow-open"
   ]
 }
