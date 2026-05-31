@@ -710,7 +710,7 @@ impl LaunchProfiles {
     #[allow(deprecated)]
     fn load(config: &mut Config) -> Self {
         const CUSTOM_PROFILE_NAME: &str = "Custom Profile";
-        let profiles = match Self::load_internal() {
+        let mut profiles = match Self::load_internal() {
             Ok(mut profiles) => {
                 profiles = Self::apply_migrations(profiles);
                 info!(
@@ -728,6 +728,8 @@ impl LaunchProfiles {
                 profiles
             }
         };
+
+        profiles.sort();
 
         if profiles.get(config.game.launch_profile).is_none() {
             // currently selected launch profile doesn't exist; select the first one if it exists
@@ -778,6 +780,10 @@ impl LaunchProfiles {
         }
 
         loaded
+    }
+
+    fn sort(&mut self) {
+        self.profiles.sort_by_key(|p| (!p.is_preset(), p.name.clone()));
     }
 
     fn load_presets() -> Self {
