@@ -104,7 +104,7 @@ pub(crate) fn get_default_offline_cache_dir() -> String {
         .to_string()
 }
 
-fn get_env_var_value(cmd: &Command, var: &str) -> Option<String> {
+pub(crate) fn get_env_var_value(cmd: &Command, var: &str) -> Option<String> {
     // Check vars on command first
     for env_var in cmd.get_envs() {
         if let (key, Some(value)) = env_var {
@@ -120,22 +120,6 @@ fn get_env_var_value(cmd: &Command, var: &str) -> Option<String> {
         if !value.is_empty() {
             return Some(value);
         }
-    }
-
-    None
-}
-
-pub(crate) fn get_compat_data_dir(cmd: &Command) -> Option<PathBuf> {
-    if cfg!(target_os = "windows") {
-        return None;
-    }
-
-    if let Some(path) = get_env_var_value(cmd, "STEAM_COMPAT_DATA_PATH") {
-        return Some(PathBuf::from(path));
-    }
-
-    if let Some(path) = get_env_var_value(cmd, "WINEPREFIX") {
-        return Some(PathBuf::from(path));
     }
 
     None

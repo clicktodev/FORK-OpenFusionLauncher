@@ -672,45 +672,53 @@ async fn prep_launch(
         #[cfg(not(target_os = "windows"))]
         {
             // Compat setup
-            let mut compat_data_dir = util::get_compat_data_dir(&cmd);
-            if compat_data_dir.is_none() {
-                // not specified; use launcher compat data dir
-                let mut launcher_compat_dir = app_statics.compat_data_dir.clone();
-                launcher_compat_dir.push(profile.get_id().to_string());
+            let mut ensure_compat_dir = true;
+            let mut compat_data_dir = app_statics.compat_data_dir.clone();
+            compat_data_dir.push(profile.get_id().to_string());
 
-                if cmd.get_program().to_string_lossy().ends_with("proton") {
-                    #[cfg(target_os = "linux")]
-                    {
+            let compat_program = std::path::Path::new(cmd.get_program())
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+
+            if compat_program.contains("proton") {
+                #[cfg(target_os = "linux")]
+                {
+                    if util::get_env_var_value(&cmd, "STEAM_COMPAT_CLIENT_INSTALL_PATH").is_none() {
                         if let Some(steam_client_dir) = protontools::get_steam_client_path() {
                             cmd.env(
                                 "STEAM_COMPAT_CLIENT_INSTALL_PATH",
-                                steam_client_dir.to_string_lossy().to_string(),
+                                steam_client_dir.into_os_string(),
                             );
                         } else {
                             return Err("Proton requires Steam to be installed".into());
                         }
-
-                        cmd.env(
-                            "STEAM_COMPAT_DATA_PATH",
-                            launcher_compat_dir.to_string_lossy().to_string(),
-                        );
-                        // proton sets WINEPREFIX internally
                     }
 
-                    #[cfg(not(target_os = "linux"))]
-                    return Err("Proton is only supported on Linux".into());
-                } else {
-                    // assume wine
-                    cmd.env(
-                        "WINEPREFIX",
-                        launcher_compat_dir.to_string_lossy().to_string(),
-                    );
+                    if let Some(proton_prefix) =
+                        util::get_env_var_value(&cmd, "STEAM_COMPAT_DATA_PATH")
+                    {
+                        compat_data_dir = proton_prefix.into();
+                    } else {
+                        cmd.env("STEAM_COMPAT_DATA_PATH", &compat_data_dir);
+                    }
+                    // proton sets WINEPREFIX internally
                 }
-                compat_data_dir = Some(launcher_compat_dir);
+
+                #[cfg(not(target_os = "linux"))]
+                return Err("Proton is only supported on Linux".into());
+            } else if compat_program.contains("wine") {
+                if let Some(wine_prefix) = util::get_env_var_value(&cmd, "WINEPREFIX") {
+                    compat_data_dir = wine_prefix.into();
+                } else {
+                    cmd.env("WINEPREFIX", &compat_data_dir.clone().into_os_string());
+                }
+            } else {
+                // unknown compat layer
+                ensure_compat_dir = false;
             }
 
-            let compat_data_dir = compat_data_dir.unwrap();
-            if !compat_data_dir.exists() {
+            if ensure_compat_dir && !compat_data_dir.exists() {
                 debug!("Creating prefix at {}", compat_data_dir.to_string_lossy());
                 std::fs::create_dir_all(&compat_data_dir)?;
             }
