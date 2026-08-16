@@ -9,6 +9,10 @@ const eslintConfig = defineConfig([
     rules: {
       "@typescript-eslint/no-explicit-any": "warn",
       "react-hooks/set-state-in-effect": "warn",
+      // Server logos/backgrounds are fetched from runtime URLs in a statically
+      // exported Tauri app with images.unoptimized, so next/image offers
+      // nothing over a plain <img> here.
+      "@next/next/no-img-element": "off",
     },
   },
   // Override default ignores of eslint-config-next.
