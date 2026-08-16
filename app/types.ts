@@ -42,6 +42,7 @@ export type LauncherSettings = {
   launch_behavior: string;
   game_cache_path: string;
   offline_cache_path: string;
+  proxy_asset_downloads: boolean;
   theme?: string;
 };
 
@@ -58,8 +59,20 @@ export type FpsFix = "on" | FpsLimit | "off";
 export type GameSettings = {
   graphics_api: string;
   window_size?: WindowSize;
-  launch_command?: string;
+  launch_profile?: string;
   fps_fix: FpsFix;
+};
+
+export type LaunchProfile = {
+  uuid: string;
+  name: string;
+  command: string;
+  preset: boolean;
+};
+
+export type LaunchProfiles = {
+  profiles: LaunchProfile[];
+  default_profile?: string;
 };
 
 export type Config = {
@@ -115,6 +128,7 @@ export type SettingsContext = {
     confirmText: string,
     confirmVariant: string,
     onConfirm: () => void,
+    title?: string
   ) => void;
 };
 
@@ -151,7 +165,7 @@ export type UpdateInfo = {
 
 export type SettingsOption = {
   key: string;
-  label: string;
+  label?: string;
   description?: string;
   value?: any;
 };

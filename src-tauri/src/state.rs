@@ -1,15 +1,22 @@
-use std::{collections::HashMap, path::PathBuf, process::Command, sync::OnceLock};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    process::Command,
+    sync::{LazyLock, OnceLock},
+};
 
 use ffbuildtool::Version;
 use log::*;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tauri::{path::BaseDirectory, Manager};
+use tauri::{Manager, path::BaseDirectory};
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::{
+    NewServerDetails, Result,
     config::{GameSettings, LauncherSettings},
     util::{self, AlertVariant},
-    NewServerDetails, Result,
 };
 
 const OPENFUSIONCLIENT_PATH: &str = "OpenFusionClient";
@@ -79,6 +86,7 @@ impl AppStatics {
 #[derive(Default)]
 pub struct AppState {
     pub config: Config,
+    pub launch_profiles: LaunchProfiles,
     pub versions: Versions,
     pub servers: Servers,
     pub tokens: Tokens,
@@ -86,11 +94,12 @@ pub struct AppState {
     pub temp_tokens: HashMap<Uuid, String>,
     pub write_config: bool,
     pub launch_cmd: Option<Command>,
+    pub proxy: Option<JoinHandle<()>>,
 }
 impl AppState {
     pub fn load(app_handle: tauri::AppHandle) -> Self {
         let config = Config::new();
-        let (config, write_config) = match config {
+        let (mut config, write_config) = match config {
             Ok(config) => (config, true),
             Err(e) => {
                 let config_exists = get_app_statics().app_data_dir.join("config.json").exists();
@@ -105,6 +114,7 @@ impl AppState {
         };
 
         let versions = Versions::new();
+        let launch_profiles = LaunchProfiles::new(&mut config);
         let mut servers = Servers::new();
         let tokens = Tokens::new();
 
@@ -115,6 +125,7 @@ impl AppState {
 
         Self {
             config,
+            launch_profiles,
             versions,
             servers,
             tokens,
@@ -122,6 +133,7 @@ impl AppState {
             temp_tokens: HashMap::new(),
             write_config,
             launch_cmd: None,
+            proxy: None,
         }
     }
 
@@ -146,6 +158,9 @@ impl AppState {
             }
         }
 
+        if let Err(e) = self.launch_profiles.save() {
+            warn!("Failed to save launch profiles: {}", e);
+        }
         if let Err(e) = self.servers.save() {
             warn!("Failed to save servers: {}", e);
         }
@@ -474,6 +489,11 @@ impl From<FlatServer> for Server {
         }
     }
 }
+impl Server {
+    pub fn get_description(&self) -> Option<String> {
+        self.description.clone()
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Servers {
@@ -593,6 +613,198 @@ impl From<FlatServers> for Servers {
         Self {
             servers: flat.servers.into_iter().map(Server::from).collect(),
             favorites: flat.favorites,
+        }
+    }
+}
+
+/// Saved launch profile
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LaunchProfile {
+    uuid: Uuid,
+    name: String,
+    command: String,
+    preset: bool,
+}
+impl LaunchProfile {
+    pub fn new(name: &str, command: &str, preset: bool) -> Self {
+        Self {
+            uuid: Uuid::new_v4(),
+            name: name.to_string(),
+            command: command.to_string(),
+            preset,
+        }
+    }
+
+    pub fn is_preset(&self) -> bool {
+        self.preset
+    }
+
+    pub fn get_id(&self) -> Uuid {
+        self.uuid
+    }
+
+    pub fn get_command(&self) -> &str {
+        &self.command
+    }
+}
+
+/// Container for saved launch profiles
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct LaunchProfiles {
+    profiles: Vec<LaunchProfile>,
+}
+impl LaunchProfiles {
+    pub fn new(config: &mut Config) -> Self {
+        Self::load(config)
+    }
+
+    pub fn get(&self, id: Uuid) -> Option<&LaunchProfile> {
+        self.profiles.iter().find(|p| p.get_id() == id)
+    }
+
+    pub fn get_default(&self) -> Option<&LaunchProfile> {
+        self.profiles
+            .iter()
+            .find(|p| p.is_preset())
+            .or_else(|| self.profiles.first())
+    }
+
+    pub fn add_entry(&mut self, name: &str, command: &str) -> Uuid {
+        let profile = LaunchProfile::new(name, command, false);
+        let id = profile.get_id();
+        self.profiles.push(profile);
+        id
+    }
+
+    pub fn update_entry(&mut self, entry: LaunchProfile) -> Result<()> {
+        for profile in &mut self.profiles {
+            if profile.get_id() == entry.get_id() {
+                if profile.is_preset() {
+                    return Err("Cannot modify preset launch profile".into());
+                }
+
+                *profile = entry;
+                return Ok(());
+            }
+        }
+        Err(format!("Launch profile with UUID {} not found", entry.get_id()).into())
+    }
+
+    pub fn remove_entry(&mut self, id: Uuid) {
+        self.profiles.retain(|p| p.get_id() != id);
+    }
+
+    pub fn has_entries(&self) -> bool {
+        !self.profiles.is_empty()
+    }
+
+    pub fn reload_presets(&mut self) {
+        // remove all existing presets
+        self.profiles.retain(|p| !p.is_preset());
+        // add fresh presets in
+        let mut presets = Self::load_presets();
+        presets.profiles.extend(self.profiles.clone());
+        *self = presets;
+    }
+
+    #[allow(deprecated)]
+    fn load(config: &mut Config) -> Self {
+        const CUSTOM_PROFILE_NAME: &str = "Custom Profile";
+        let mut profiles = match Self::load_internal() {
+            Ok(mut profiles) => {
+                profiles = Self::apply_migrations(profiles);
+                info!(
+                    "Loaded {} launch profiles from app data",
+                    profiles.profiles.len()
+                );
+                profiles
+            }
+            Err(_) => {
+                let mut profiles = Self::load_presets();
+                if let Some(current_cmd) = config.game.launch_command.as_ref() {
+                    let profile_id = profiles.add_entry(CUSTOM_PROFILE_NAME, current_cmd);
+                    config.game.launch_profile = profile_id;
+                }
+                profiles
+            }
+        };
+
+        profiles.sort();
+
+        if profiles.get(config.game.launch_profile).is_none() {
+            // currently selected launch profile doesn't exist; select the first one if it exists
+            if let Some(default) = profiles.get_default() {
+                config.game.launch_profile = default.get_id();
+            } else {
+                config.game.launch_profile = Uuid::nil();
+            }
+        }
+        profiles
+    }
+
+    fn save(&self) -> Result<()> {
+        let commands_path = get_app_statics().app_data_dir.join("launch_profiles.json");
+        let commands_str = serde_json::to_string_pretty(self)?;
+        std::fs::write(commands_path, commands_str)?;
+        Ok(())
+    }
+
+    fn load_internal() -> Result<Self> {
+        let commands_path = get_app_statics().app_data_dir.join("launch_profiles.json");
+        let commands_str = std::fs::read_to_string(commands_path)?;
+        let commands: Self = serde_json::from_str(&commands_str)?;
+        Ok(commands)
+    }
+
+    fn apply_migrations(mut loaded: LaunchProfiles) -> LaunchProfiles {
+        // Strip `STEAM_COMPAT_CLIENT_INSTALL_PATH` env var from all presets;
+        // it's set at runtime now as part of compat setup.
+        static STEAM_COMPAT_REMOVAL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r#"\s*STEAM_COMPAT_CLIENT_INSTALL_PATH="[^"]*"\s*"#).unwrap()
+        });
+
+        for profile in &mut loaded.profiles {
+            if profile.is_preset() {
+                let new_command = STEAM_COMPAT_REMOVAL_REGEX
+                    .replace_all(&profile.command, " ")
+                    .trim()
+                    .to_string();
+                if new_command != profile.command {
+                    debug!(
+                        "Migrating launch profile {}: stripping STEAM_COMPAT_CLIENT_INSTALL_PATH",
+                        profile.get_id()
+                    );
+                    profile.command = new_command;
+                }
+            }
+        }
+
+        loaded
+    }
+
+    fn sort(&mut self) {
+        self.profiles
+            .sort_by_key(|p| (!p.is_preset(), p.name.clone()));
+    }
+
+    fn load_presets() -> Self {
+        info!("Loading preset launch profiles");
+        let profiles = util::get_preset_launch_profiles();
+        Self { profiles }
+    }
+}
+
+/// Frontend view of launch profiles, with the computed default profile ID
+#[derive(Debug, Serialize, Clone)]
+pub struct LaunchProfilesView {
+    profiles: Vec<LaunchProfile>,
+    default_profile: Option<Uuid>,
+}
+impl From<&LaunchProfiles> for LaunchProfilesView {
+    fn from(lp: &LaunchProfiles) -> Self {
+        Self {
+            profiles: lp.profiles.clone(),
+            default_profile: lp.get_default().map(|p| p.get_id()),
         }
     }
 }

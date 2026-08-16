@@ -5,7 +5,7 @@ use std::{
     env,
     path::{Path, PathBuf},
     process::Command,
-    sync::{mpsc, OnceLock},
+    sync::{OnceLock, mpsc},
     time::Duration,
 };
 
@@ -17,8 +17,8 @@ use tauri::Emitter as _;
 use uuid::Uuid;
 
 use crate::{
-    state::get_app_statics, CacheEvent, CacheProgress, CacheProgressItem, Result,
-    CACHE_PROGRESS_EVENT,
+    CACHE_PROGRESS_EVENT, CacheEvent, CacheProgress, CacheProgressItem, Result,
+    state::{LaunchProfile, get_app_statics},
 };
 
 static APP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
@@ -80,6 +80,12 @@ fn resolve_host(host: &str) -> Result<String> {
 
 pub(crate) fn resolve_server_addr(addr: &str) -> Result<String> {
     let (host, port) = split_addr_port(addr)?;
+
+    // if we alredy have an IP, nothing to resolve
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(addr.to_string());
+    }
+
     let Ok(ip) = resolve_host(&host) else {
         return Err(format!("Failed to resolve game server address {}", addr).into());
     };
@@ -98,105 +104,104 @@ pub(crate) fn get_default_offline_cache_dir() -> String {
         .to_string()
 }
 
-pub(crate) fn is_device_steam_deck() -> bool {
-    if cfg!(target_os = "linux") {
-        if let Ok(content) = std::fs::read_to_string("/sys/devices/virtual/dmi/id/board_vendor") {
-            if content.trim() == "Valve" {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn get_steam_client_path() -> Option<PathBuf> {
-    let home_path = PathBuf::from(env::var("HOME").ok()?);
-    let steam_path = home_path.join(".steam/steam");
-    if steam_path.exists() {
-        Some(steam_path)
-    } else {
-        None
-    }
-}
-
-fn get_steam_root_path() -> Option<PathBuf> {
-    let home_path = PathBuf::from(env::var("HOME").ok()?);
-    let steam_root_path = home_path.join(".steam/root");
-    if steam_root_path.exists() {
-        Some(steam_root_path)
-    } else {
-        None
-    }
-}
-
-fn find_proton() -> Option<PathBuf> {
-    let steam_root = get_steam_root_path()?;
-    let steamapps_common_path = steam_root.join("steamapps/common/");
-    if !steamapps_common_path.exists() {
-        return None;
-    }
-
-    // Find all installed Proton versions
-    let entries = std::fs::read_dir(steamapps_common_path).ok()?;
-    let mut candidates = Vec::new();
-    for entry in entries {
-        let entry = entry.ok()?;
-        let file_name = entry.file_name();
-        let file_name_str = file_name.to_string_lossy();
-        if file_name_str.starts_with("Proton ") {
-            let proton_path = entry.path().join("proton");
-            if proton_path.exists() {
-                let date = entry.metadata().ok()?.modified().ok()?;
-                candidates.push((proton_path, date));
+pub(crate) fn get_env_var_value(cmd: &Command, var: &str) -> Option<String> {
+    // Check vars on command first
+    for env_var in cmd.get_envs() {
+        if let (key, Some(value)) = env_var {
+            let value = value.to_string_lossy().to_string();
+            if key == var && !value.is_empty() {
+                return Some(value);
             }
         }
     }
 
-    // Sort by modification date, newest first
-    candidates.sort_by(|a, b| b.1.cmp(&a.1));
-    candidates.first().map(|(path, _)| path.clone())
+    // Check env
+    if let Ok(value) = env::var(var) {
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+
+    None
 }
 
-fn find_macos_wine() -> Option<PathBuf> {
+#[cfg(target_os = "macos")]
+fn find_macos_wine_installs() -> Vec<(String, PathBuf)> {
     const CANDIDATES: [&str; 5] = [
         "/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/CrossOver-Hosted Application/wineloader",
         "/Applications/Wine Crossover.app/Contents/Resources/wine/bin/wine",
         "/Applications/Wine Stable.app/Contents/Resources/wine/bin/wine",
         "/Applications/Wine Devel.app/Contents/Resources/wine/bin/wine",
-        "/Applications/Wine Staging.app/Contents/Resources/wine/bin/wine"
+        "/Applications/Wine Staging.app/Contents/Resources/wine/bin/wine",
     ];
 
+    let mut installs = Vec::new();
     for p in &CANDIDATES {
         let path = PathBuf::from(p);
         if path.exists() {
-            return Some(path);
+            let app_name = path
+                .to_string_lossy()
+                .split("/")
+                .nth(2)
+                .unwrap()
+                .trim_end_matches(".app")
+                .to_string();
+            installs.push((app_name, path));
         }
     }
-    None
+    installs
 }
 
-pub(crate) fn get_default_launch_command() -> Option<String> {
-    if cfg!(target_os = "windows") {
-        None
-    } else if cfg!(target_os = "macos") {
-        if let Some(wine_path) = find_macos_wine() {
-            Some(format!("\"{}\" {{}}", wine_path.to_string_lossy()))
-        } else {
-            Some("wine {}".to_string())
-        }
-    } else if is_device_steam_deck() {
-        let steam_compat_data_path = get_app_statics().compat_data_dir.clone();
-        let steam_compat_client_install_path = get_steam_client_path()?;
-        let proton_path = find_proton()?;
-        Some(format!(
-            "STEAM_COMPAT_DATA_PATH=\"{}\" STEAM_COMPAT_CLIENT_INSTALL_PATH=\"{}\" \"{}\" run {{}}",
-            steam_compat_data_path.to_string_lossy(),
-            steam_compat_client_install_path.to_string_lossy(),
-            proton_path.to_string_lossy()
-        ))
-    } else {
-        Some("wine {}".to_string())
+/// Returns a list of preset launch profiles based on the OS and
+/// available compatibility layers, in order of preference.
+pub(crate) fn get_preset_launch_profiles() -> Vec<LaunchProfile> {
+    let mut profiles = Vec::new();
+
+    #[cfg(target_os = "windows")]
+    {
+        // On Windows, we can just run the game directly with no compatibility layer
+        profiles.push(LaunchProfile::new("Native", "{}", true));
     }
+
+    #[cfg(target_os = "macos")]
+    {
+        // Find Wine installs
+        for (app_name, wine_path) in find_macos_wine_installs() {
+            let wine_cmd = format!("\"{}\" {{}}", wine_path.to_string_lossy());
+            profiles.push(LaunchProfile::new(&app_name, &wine_cmd, true));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Find Proton installs
+        for proton_install in protontools::find_all_proton_installs() {
+            let proton_path = proton_install.get_exe_path();
+            let profile_name = proton_path
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap();
+
+            profiles.push(LaunchProfile::new(
+                &profile_name,
+                &format!("\"{}\" run {{}}", proton_path.to_string_lossy()),
+                true,
+            ));
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Look for Wine on PATH
+        if let Ok(wine) = which::which("wine") {
+            let name = format!("Wine ({})", wine.to_string_lossy());
+            let wine_cmd = format!("\"{}\" {{}}", wine.to_string_lossy());
+            profiles.push(LaunchProfile::new(&name, &wine_cmd, true));
+        }
+    }
+
+    profiles
 }
 
 pub(crate) fn get_cache_dir_for_version(base_cache_dir: &str, version: &Version) -> PathBuf {
@@ -473,21 +478,65 @@ fn extract_env_vars_from_tokens(tokens: &mut Vec<String>) -> HashMap<String, Str
     env_vars
 }
 
-pub(crate) fn gen_launch_command(base_cmd: Command, launch_fmt: &str) -> Command {
-    const REPLACEMENT_TOKEN: &str = "{}";
+pub(crate) fn gen_launch_command(base_cmd: Command, launch_fmt: &str) -> Result<Command> {
+    const REPLACEMENT_TOKEN_LEFT: &str = "{";
+    const REPLACEMENT_TOKEN_RIGHT: &str = "}";
 
-    let mut base_command_str = base_cmd.get_program().to_string_lossy().to_string();
+    // Prepare the ffrunner portion of the command for tokenization.
+    let mut base_command_str = format!("\"{}\"", base_cmd.get_program().to_string_lossy());
     for arg in base_cmd.get_args() {
         base_command_str.push(' ');
         base_command_str.push_str(arg.to_string_lossy().to_string().as_str());
     }
 
-    let launch_command_str = launch_fmt.replace(REPLACEMENT_TOKEN, &base_command_str);
+    let mut launch_command_str = launch_fmt.to_string();
+
+    // Replace newlines with spaces
+    launch_command_str = launch_command_str.replace("\r\n", " ");
+    launch_command_str = launch_command_str.replace("\n", " ");
+
+    // Substitute the base command + environment variables in the replacement tokens into the launch format string.
+    let mut base_replaced = false;
+    while let Some(start) = launch_command_str.find(REPLACEMENT_TOKEN_LEFT) {
+        if let Some(end) = launch_command_str[start..].find(REPLACEMENT_TOKEN_RIGHT) {
+            let replacement_identifier =
+                &launch_command_str[start + REPLACEMENT_TOKEN_LEFT.len()..start + end];
+            let replacement_value = if replacement_identifier.is_empty() {
+                base_replaced = true;
+                base_command_str.clone()
+            } else {
+                env::var(replacement_identifier).map_err(|_| {
+                    format!("Environment variable {} not set", replacement_identifier)
+                })?
+            };
+
+            launch_command_str.replace_range(
+                start..start + end + REPLACEMENT_TOKEN_RIGHT.len(),
+                &replacement_value,
+            );
+        } else {
+            break;
+        }
+    }
+
+    if !base_replaced {
+        return Err(format!(
+            "Invalid launch format string: missing {}{}",
+            REPLACEMENT_TOKEN_LEFT, REPLACEMENT_TOKEN_RIGHT
+        )
+        .into());
+    }
+
+    // Tokenize and insert env vars into the env for the command
     let mut launch_command_tokens = tokenize_launch_command(&launch_command_str);
     let user_env_vars = extract_env_vars_from_tokens(&mut launch_command_tokens);
 
     let mut launch_command = Command::new(&launch_command_tokens[0]);
-    launch_command.current_dir(base_cmd.get_current_dir().unwrap());
+    launch_command.current_dir(
+        base_cmd
+            .get_current_dir()
+            .ok_or("Invalid working directory".to_string())?,
+    );
 
     for env in base_cmd.get_envs() {
         launch_command.env(env.0, env.1.unwrap());
@@ -498,7 +547,7 @@ pub(crate) fn gen_launch_command(base_cmd: Command, launch_fmt: &str) -> Command
     }
 
     launch_command.args(&launch_command_tokens[1..]);
-    launch_command
+    Ok(launch_command)
 }
 
 pub(crate) fn get_launch_cmd_dbg_str(command: &Command, with_env: bool) -> String {
@@ -526,4 +575,15 @@ pub(crate) fn get_launch_cmd_dbg_str(command: &Command, with_env: bool) -> Strin
 pub(crate) fn log_command(command: &Command) {
     let command_str = get_launch_cmd_dbg_str(command, true);
     debug!("Launching game: {}", command_str);
+}
+
+pub(crate) async fn does_web_file_exist(url: &str) -> bool {
+    let client = get_http_client();
+    match client.head(url).send().await {
+        Ok(response) => response.status().is_success(),
+        Err(e) => {
+            debug!("Failed to check if web file exists: {}", e);
+            false
+        }
+    }
 }

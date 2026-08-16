@@ -7,24 +7,31 @@ use config::{LaunchBehavior, LauncherSettings};
 use endpoint::{AccountInfo, InfoResponse, RegisterResponse, Session};
 use ffbuildtool::{ItemProgress, Version};
 use regex::Regex;
+use rust_proxy::proxy::tcp::TcpProxy;
 use serde::{Deserialize, Serialize};
 use state::{
-    get_app_statics, AppState, Config, FlatServer, FlatServers, Server, ServerInfo, Versions,
+    AppState, Config, FlatServer, FlatServers, Server, ServerInfo, Versions, get_app_statics,
 };
-use tauri_plugin_shell::ShellExt;
+use tauri_plugin_opener::OpenerExt;
 use util::AlertVariant;
 
 use std::{
     collections::{HashMap, HashSet},
     env,
-    sync::{mpsc, Arc, LazyLock, OnceLock},
+    process::Stdio,
+    sync::{Arc, LazyLock, OnceLock, mpsc},
     vec,
 };
-use tokio::sync::{Mutex, Semaphore};
+use tokio::{
+    net::TcpListener,
+    sync::{Mutex, Semaphore},
+};
 
 use log::*;
 use tauri::Manager;
 use uuid::Uuid;
+
+use crate::state::{LaunchProfile, LaunchProfilesView};
 
 type Error = Box<dyn std::error::Error>;
 type Result<T> = std::result::Result<T, Error>;
@@ -41,7 +48,6 @@ const DOWNLOAD_PAGE_URL: &str = "https://openfusion.dev/download/";
 #[derive(Debug, Deserialize)]
 struct UpdateCheckResponse {
     tag_name: String,
-    html_url: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -101,6 +107,7 @@ async fn do_launch(app_handle: tauri::AppHandle) -> CommandResult<i32> {
     debug!("do_launch");
     let state = app_handle.state::<Mutex<AppState>>();
     let mut state = state.lock().await;
+    let proxy_enabled = state.config.launcher.proxy_asset_downloads;
     let launch_behavior = state.config.launcher.launch_behavior;
     let mut cmd = state.launch_cmd.take().ok_or("No launch prepared")?;
     let cmd_str = util::get_launch_cmd_dbg_str(&cmd, false);
@@ -113,11 +120,29 @@ async fn do_launch(app_handle: tauri::AppHandle) -> CommandResult<i32> {
             .to_string();
         format!("{} (launch command was: {})", e, censored_cmd_str)
     })?;
+
+    if launch_behavior == LaunchBehavior::Quit && !proxy_enabled {
+        // no need to keep the proxy alive; we can quit immediately
+        app_handle.exit(0);
+        return Ok(0);
+    }
+
+    let exit_result = proc.wait();
+
+    // shutdown the asset proxy
+    let state = app_handle.state::<Mutex<AppState>>();
+    let mut state = state.lock().await;
+    if let Some(proxy) = state.proxy.take() {
+        proxy.abort();
+    };
+
+    // no need to do any error handling. quit now so the user doesn't see us again.
     if launch_behavior == LaunchBehavior::Quit {
         app_handle.exit(0);
         return Ok(0);
     }
-    let exit_code = proc.wait().map_err(|e| e.to_string())?;
+
+    let exit_code = exit_result.map_err(|e| e.to_string())?;
     Ok(exit_code.code().unwrap_or(0))
 }
 
@@ -383,9 +408,11 @@ async fn prep_launch(
             .ok_or(format!("Server {} not found", server_uuid))?
             .clone();
 
+        let mut server_name = server.get_description();
         let addr;
         let mut versions = Vec::new();
         let mut custom_loading_screen = false;
+        let mut custom_icon_url = None;
         match &server.info {
             ServerInfo::Simple { ip, version } => {
                 addr = ip.clone();
@@ -401,6 +428,11 @@ async fn prep_launch(
                     custom_loading_screen = true;
                 }
 
+                if let Ok(icon_url) = endpoint::get_custom_icon_url(endpoint).await {
+                    custom_icon_url = icon_url;
+                }
+
+                server_name = Some(format!("\"{}\"", api_info.server_name));
                 addr = api_info.login_address.clone();
                 versions = api_info.get_supported_versions();
             }
@@ -515,6 +547,28 @@ async fn prep_launch(
                 asset_url = offline_asset_url;
                 main_url = offline_main_url;
             }
+        } else if state.config.launcher.proxy_asset_downloads {
+            let mut proxy = TcpProxy::default();
+            proxy.set_base_path(asset_url.clone());
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let proxy_addr = listener.local_addr()?;
+            let new_asset_url = format!("http://{}", proxy_addr);
+            asset_url = new_asset_url;
+
+            let handle = tokio::spawn(async move {
+                proxy.run(&listener).await;
+            });
+            state.proxy = Some(handle);
+        }
+
+        // Upgrade the main URL to HTTPS, if it's available, since ffrunner supports it
+        if main_url.starts_with("http://") {
+            let main_url_upgraded = main_url.replacen("http://", "https://", 1);
+            if util::does_web_file_exist(&main_url_upgraded).await {
+                main_url = main_url_upgraded;
+            } else if !util::does_web_file_exist(&main_url).await {
+                return Err(format!("Main file not found: {}", main_url).into());
+            }
         }
 
         debug!("Asset URL: {}", asset_url);
@@ -533,6 +587,16 @@ async fn prep_launch(
             .args(["-a", &ip])
             .args(["--asseturl", &format!("{}/", asset_url)])
             .args(["-l", &log_file_path]);
+
+        if let Some(server_name) = server_name {
+            // window title
+            cmd.args(["-n", &server_name]);
+        }
+
+        if let Some(icon_url) = custom_icon_url {
+            // window icon
+            cmd.args(["-i", &icon_url]);
+        }
 
         if let ServerInfo::Endpoint { endpoint, .. } = &server.info {
             match session_token {
@@ -589,44 +653,82 @@ async fn prep_launch(
         #[cfg(debug_assertions)]
         cmd.arg("-v"); // verbose logging
 
-        if let Some(launch_fmt) = &state.config.game.launch_command {
-            cmd = util::gen_launch_command(cmd, launch_fmt);
+        if !state.launch_profiles.has_entries() {
+            return Err("No launch profiles found in game settings. Please create one.".into());
         }
+
+        let selected_launch_profile = state.config.game.launch_profile;
+        let profile = state
+            .launch_profiles
+            .get(selected_launch_profile)
+            .ok_or(format!(
+                "Launch profile '{}' not found",
+                selected_launch_profile
+            ))?;
+
+        let launch_fmt = profile.get_command();
+        cmd = util::gen_launch_command(cmd, launch_fmt)?;
 
         #[cfg(not(target_os = "windows"))]
         {
-            // The compat data dir is, in order of priority:
-            // 1. WINEPREFIX env var in the launch command, if set
-            // 2. WINEPREFIX env var in the current environment, if set
-            // 3. The default compat data dir in the app cache
-            let mut compat_data_dir = None;
-            for env_var in cmd.get_envs() {
-                if let (key, Some(value)) = env_var {
-                    if key == "WINEPREFIX" {
-                        compat_data_dir = Some(value.into());
+            // Compat setup
+            let mut ensure_compat_dir = true;
+            let mut compat_data_dir = app_statics.compat_data_dir.clone();
+            compat_data_dir.push(profile.get_id().to_string());
+
+            let compat_program = std::path::Path::new(cmd.get_program())
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+
+            if compat_program.contains("proton") {
+                #[cfg(target_os = "linux")]
+                {
+                    if util::get_env_var_value(&cmd, "STEAM_COMPAT_CLIENT_INSTALL_PATH").is_none() {
+                        if let Some(steam_client_dir) = protontools::get_steam_client_path() {
+                            cmd.env(
+                                "STEAM_COMPAT_CLIENT_INSTALL_PATH",
+                                steam_client_dir.into_os_string(),
+                            );
+                        } else {
+                            return Err("Proton requires Steam to be installed".into());
+                        }
                     }
+
+                    if let Some(proton_prefix) =
+                        util::get_env_var_value(&cmd, "STEAM_COMPAT_DATA_PATH")
+                    {
+                        compat_data_dir = proton_prefix.into();
+                    } else {
+                        cmd.env("STEAM_COMPAT_DATA_PATH", &compat_data_dir);
+                    }
+                    // proton sets WINEPREFIX internally
                 }
+
+                #[cfg(not(target_os = "linux"))]
+                return Err("Proton is only supported on Linux".into());
+            } else if compat_program.contains("wine") {
+                if let Some(wine_prefix) = util::get_env_var_value(&cmd, "WINEPREFIX") {
+                    compat_data_dir = wine_prefix.into();
+                } else {
+                    cmd.env("WINEPREFIX", &compat_data_dir.clone().into_os_string());
+                }
+            } else {
+                // unknown compat layer
+                ensure_compat_dir = false;
             }
 
-            if compat_data_dir.is_none() && env::var("WINEPREFIX").is_ok_and(|val| !val.is_empty())
-            {
-                compat_data_dir = Some(env::var("WINEPREFIX").unwrap().into());
-            }
-
-            if compat_data_dir.is_none() {
-                compat_data_dir = Some(app_statics.compat_data_dir.clone());
-            }
-
-            let compat_data_dir = compat_data_dir.unwrap();
-            if !compat_data_dir.exists() {
+            if ensure_compat_dir && !compat_data_dir.exists() {
+                debug!("Creating prefix at {}", compat_data_dir.to_string_lossy());
                 std::fs::create_dir_all(&compat_data_dir)?;
             }
-
-            if !util::is_device_steam_deck() {
-                // we want to let Proton set this itself on Deck
-                cmd.env("WINEPREFIX", compat_data_dir.to_string_lossy().to_string());
-            }
         }
+
+        // Detach stdio so the child doesn't crash from broken pipes
+        // when the launcher exits (e.g. LaunchBehavior::Quit)
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::null());
 
         util::log_command(&cmd);
         state.launch_cmd = Some(cmd);
@@ -1091,7 +1193,9 @@ async fn open_folder_for_version(
         drop(state);
 
         if cache_dir.exists() {
-            app_handle.shell().open(cache_dir.to_str().unwrap(), None)?;
+            app_handle
+                .opener()
+                .open_path(cache_dir.to_str().unwrap(), None::<&str>)?;
         } else {
             return Err("Cache directory does not exist".into());
         }
@@ -1172,11 +1276,81 @@ async fn get_versions(app_handle: tauri::AppHandle) -> Versions {
 }
 
 #[tauri::command]
+async fn get_launch_profiles(app_handle: tauri::AppHandle) -> LaunchProfilesView {
+    debug!("get_launch_profiles");
+    let state = app_handle.state::<Mutex<AppState>>();
+    let state = state.lock().await;
+    LaunchProfilesView::from(&state.launch_profiles)
+}
+
+#[tauri::command]
 async fn get_config(app_handle: tauri::AppHandle) -> Config {
     debug!("get_config");
     let state = app_handle.state::<Mutex<AppState>>();
     let state = state.lock().await;
     state.config.clone()
+}
+
+#[tauri::command]
+async fn add_launch_profile(
+    app_handle: tauri::AppHandle,
+    name: String,
+    command: String,
+) -> CommandResult<Uuid> {
+    debug!("add_launch_profile");
+    let state = app_handle.state::<Mutex<AppState>>();
+    let mut state = state.lock().await;
+    let profile_id = state.launch_profiles.add_entry(&name, &command);
+    state.save();
+    Ok(profile_id)
+}
+
+#[tauri::command]
+async fn update_launch_profile(
+    app_handle: tauri::AppHandle,
+    profile: LaunchProfile,
+) -> CommandResult<()> {
+    debug!("update_launch_profile");
+    let internal = async {
+        let state = app_handle.state::<Mutex<AppState>>();
+        let mut state = state.lock().await;
+        state.launch_profiles.update_entry(profile)?;
+        state.save();
+        Ok(())
+    };
+    internal.await.map_err(|e: Error| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_launch_profile(app_handle: tauri::AppHandle, uuid: Uuid) -> CommandResult<()> {
+    debug!("delete_launch_profile");
+    let internal = async {
+        let state = app_handle.state::<Mutex<AppState>>();
+        {
+            // Delete the profile and save to disk
+            let mut state = state.lock().await;
+            state.launch_profiles.remove_entry(uuid);
+            state.save();
+        }
+
+        // Delete compat dir if it exists
+        #[cfg(not(target_os = "windows"))]
+        {
+            let statics = get_app_statics();
+            let compat_dir = statics.compat_data_dir.join(uuid.to_string());
+            if compat_dir.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&compat_dir) {
+                    warn!(
+                        "Failed to remove compat data directory for launch profile {}: {}",
+                        uuid, e
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    };
+    internal.await.map_err(|e: Error| e.to_string())
 }
 
 #[tauri::command]
@@ -1205,9 +1379,15 @@ async fn reset_launcher_config(app_handle: tauri::AppHandle) -> CommandResult<()
 #[tauri::command]
 async fn reset_game_config(app_handle: tauri::AppHandle) -> CommandResult<()> {
     debug!("reset_game_config");
-    let default_game_config = config::GameSettings::default();
+    let mut default_game_config = config::GameSettings::default();
     let state = app_handle.state::<Mutex<AppState>>();
     let mut state = state.lock().await;
+
+    state.launch_profiles.reload_presets();
+    if let Some(new_default_profile) = state.launch_profiles.get_default() {
+        default_game_config.launch_profile = new_default_profile.get_id();
+    }
+
     state.config.game = default_game_config;
     state.write_config = true;
     state.save();
@@ -1252,7 +1432,7 @@ fn is_debug_mode() -> bool {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -1291,7 +1471,11 @@ pub fn run() {
             check_for_update,
             get_versions,
             get_servers,
+            get_launch_profiles,
             get_config,
+            add_launch_profile,
+            update_launch_profile,
+            delete_launch_profile,
             update_config,
             reset_launcher_config,
             reset_game_config,

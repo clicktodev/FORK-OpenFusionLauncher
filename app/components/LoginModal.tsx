@@ -11,7 +11,7 @@ import { EndpointInfo, ServerEntry } from "@/app/types";
 import { validateUsername, validatePassword, validateEmail, getPrivacyPolicyUrlForServer } from "@/app/util";
 import { Overlay, Tooltip } from "react-bootstrap";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-shell";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { parse } from "marked";
 import DOMPurify  from "dompurify";
 import get_seed from "@/app/seed";
@@ -27,9 +27,12 @@ const CONTROL_ID_NEW_PASSWORD = "newPassword";
 const CONTROL_ID_CONFIRM_PASSWORD = "confirmPassword";
 const CONTROL_ID_EMAIL = "email";
 
+const EMAIL_DISCLAIMER = "A verification email will be sent to the address you provided. Please click on the enclosed link in order to complete the registration process as soon as possible.\n\nIf you do not click the verification link, the email will not be linked to your account. You will still be able to log in, but **you will not be able to recover your password.**";
+const NO_EMAIL_DISCLAIMER = "Continue without entering an email address? If there is no email linked to your account, **there will be no way to recover your password if you forget it**.\n\nIf you're logged in, you can always add an email address later by going to Settings -> Authentication -> Manage Account";
+
 const replaceLinksWithShellOpen = (html: string) => {
   return html.replace(/<a href="([^"]+)">([^<]+)<\/a>/g, (match, href, text) => {
-    return `<a href="#" onclick="window.__TAURI__.shell.open('${href}'); return false;">${text}</a>`;
+    return `<a href="#" onclick="window.__TAURI__.opener.openUrl('${href}'); return false;">${text}</a>`;
   });
 };
 
@@ -132,6 +135,7 @@ export default function LoginModal({
   onSubmitLogin,
   onSubmitRegister,
   onForgotPassword,
+  showConfirmationModal,
 }: {
   server?: ServerEntry;
   show: boolean;
@@ -140,6 +144,13 @@ export default function LoginModal({
   onSubmitLogin: (username: string, password: string, remember: boolean) => void;
   onSubmitRegister: (username: string, password: string, email: string) => void;
   onForgotPassword: () => void;
+  showConfirmationModal?: (
+    message: string,
+    confirmText: string,
+    confirmVariant: string,
+    onConfirm: () => void,
+    title?: string,
+  ) => void;
 }) {
   const [username, setUsername] = useState<string>("");
   const [password, setPassword] = useState<string>("");
@@ -196,12 +207,36 @@ export default function LoginModal({
     }
   };
 
+  const onSubmit = () => {
+    if (tab === TAB_REGISTER && showConfirmationModal) {
+      if (email.length > 0) {
+        showConfirmationModal(
+          EMAIL_DISCLAIMER,
+          "I understand",
+          "danger",
+          submitForm,
+          "Note!",
+        );
+      } else {
+        showConfirmationModal(
+          NO_EMAIL_DISCLAIMER,
+          "I understand",
+          "danger",
+          submitForm,
+          "Note!",
+        );
+      }
+    } else {
+      submitForm();
+    }
+  }
+
   return (
     <Modal show={show && !!server} onHide={onClose} centered={true} size="lg">
       <Form
         onSubmit={(e) => {
           e.preventDefault();
-          submitForm();
+          onSubmit();
         }}
       >
         <Modal.Header>
@@ -310,7 +345,7 @@ export default function LoginModal({
                     className="text-decoration-underline"
                     onClick={() => {
                       const url = getPrivacyPolicyUrlForServer(server!);
-                      open(url);
+                      openUrl(url);
                     }}
                   >
                     privacy policy
@@ -340,7 +375,7 @@ export default function LoginModal({
         <Modal.Footer>
           <Button onClick={onClose} variant="primary" text="Cancel" />
           <Button
-            onClick={submitForm}
+            onClick={onSubmit}
             variant="success"
             text={tab === TAB_LOGIN ? "Log In" : "Register"}
             enabled={canSubmit(tab)}

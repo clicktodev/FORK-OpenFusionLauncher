@@ -7,6 +7,7 @@ import {
   Config,
   GameSettings,
   LauncherSettings,
+  LaunchProfiles,
   LoadingTask,
   SettingsContext,
 } from "@/app/types";
@@ -35,10 +36,12 @@ export default function SettingsPage() {
 
   const [tab, setTab] = useState(DEFAULT_TAB);
 
+  const [launchProfiles, setLaunchProfiles] = useState<LaunchProfiles>({ profiles: [] });
   const [config, setConfig] = useState<Config | undefined>(undefined);
 
   // confirmation modal
   const [showConfirmation, setShowConfirmation] = useState(false);
+  const [confirmationTitle, setConfirmationTitle] = useState("");
   const [confirmationMessage, setConfirmationMessage] = useState("");
   const [confirmationConfirmText, setConfirmationConfirmText] = useState("");
   const [confirmationConfirmVariant, setConfirmationConfirmVariant] =
@@ -88,7 +91,9 @@ export default function SettingsPage() {
     confirmText: string,
     confirmVariant: string,
     onConfirm: () => void,
+    title?: string
   ) => {
+    setConfirmationTitle(title || "Confirm");
     setConfirmationMessage(message);
     setConfirmationConfirmText(confirmText);
     setConfirmationConfirmVariant(confirmVariant);
@@ -104,9 +109,16 @@ export default function SettingsPage() {
     return config;
   };
 
+  const syncLaunchProfiles = async () => {
+    const profiles: LaunchProfiles = await invoke("get_launch_profiles");
+    setLaunchProfiles(profiles);
+    return profiles;
+  }
+
   const doInit = async () => {
     try {
       await invoke("reload_state");
+      await syncLaunchProfiles();
       await syncConfig();
       setInitialFetchDone(true);
     } catch (e) {
@@ -159,6 +171,7 @@ export default function SettingsPage() {
     } else {
       await resetGameSettings();
     }
+    await syncLaunchProfiles();
     const updatedConfig = await syncConfig();
     return updatedConfig.game;
   };
@@ -210,6 +223,7 @@ export default function SettingsPage() {
             {config && (
               <GameSettingsTab
                 active={tab == TAB_GAME_SETTINGS}
+                currentProfiles={launchProfiles}
                 currentSettings={config.game}
                 updateSettings={updateGameSettings}
               />
@@ -240,6 +254,7 @@ export default function SettingsPage() {
       <ConfirmationModal
         show={showConfirmation}
         setShow={setShowConfirmation}
+        title={confirmationTitle}
         message={confirmationMessage}
         confirmText={confirmationConfirmText}
         confirmVariant={confirmationConfirmVariant}

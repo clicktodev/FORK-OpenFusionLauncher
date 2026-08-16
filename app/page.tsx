@@ -44,6 +44,7 @@ import {
   sleep,
 } from "@/app/util";
 import ForgotPasswordModal from "./components/ForgotPasswordModal";
+import ConfirmationModal from "./components/ConfirmationModal";
 import { useRouter } from "next/navigation";
 import { EasterEggs } from "./components/EasterEggs";
 
@@ -87,6 +88,16 @@ export default function Home() {
   const [showAboutModal, setShowAboutModal] = useState(false);
 
   const [connecting, setConnecting] = useState(false);
+
+  const [showConfirmation, setShowConfirmation] = useState(false);
+  const [confirmationTitle, setConfirmationTitle] = useState("");
+  const [confirmationMessage, setConfirmationMessage] = useState("");
+  const [confirmationConfirmText, setConfirmationConfirmText] = useState("");
+  const [confirmationConfirmVariant, setConfirmationConfirmVariant] =
+    useState("");
+  const [confirmationOnConfirm, setConfirmationOnConfirm] = useState<
+    () => void
+  >(() => {});
 
   const getSelectedServer = () => {
     if (selectedIdx >= 0 && selectedIdx < servers.length) {
@@ -137,6 +148,21 @@ export default function Home() {
 
   const stopLoading = (id: string) => {
     setLoadingTasks((tasks) => tasks.filter((task) => task.id != id));
+  };
+
+  const showConfirmationModal = (
+    message: string,
+    confirmText: string,
+    confirmVariant: string,
+    onConfirm: () => void,
+    title?: string
+  ) => {
+    setConfirmationTitle(title || "Confirm");
+    setConfirmationMessage(message);
+    setConfirmationConfirmText(confirmText);
+    setConfirmationConfirmVariant(confirmVariant);
+    setConfirmationOnConfirm(() => onConfirm);
+    setShowConfirmation(true);
   };
 
   const syncServers = async () => {
@@ -290,7 +316,7 @@ export default function Home() {
       }
       stopLoading("launch");
       setCurrentSession(undefined);
-      if (config!.launcher.launch_behavior == "hide") {
+      if (config!.launcher.launch_behavior != "stay_open") {
         await getCurrentWindow().hide();
       }
       const exitCode: number = await invoke("do_launch");
@@ -685,6 +711,7 @@ export default function Home() {
           onRegister(getSelectedServer()!.uuid, username, password, email);
         }}
         onForgotPassword={() => setShowForgotPasswordModal(true)}
+        showConfirmationModal={showConfirmationModal}
       />
       <ForgotPasswordModal
         show={showForgotPasswordModal}
@@ -706,6 +733,18 @@ export default function Home() {
         setShow={setShowAboutModal}
         name={appName}
         version={launcherVersion}
+      />
+      <ConfirmationModal
+        show={showConfirmation}
+        setShow={setShowConfirmation}
+        title={confirmationTitle}
+        message={confirmationMessage}
+        confirmText={confirmationConfirmText}
+        confirmVariant={confirmationConfirmVariant}
+        onConfirm={() => {
+          confirmationOnConfirm();
+          setShowConfirmation(false);
+        }}
       />
     </>
   ) : (
