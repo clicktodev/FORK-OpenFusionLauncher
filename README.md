@@ -44,4 +44,4 @@ Run `cargo tauri dev` to spawn the app. **Hot reload is on, so any changes you m
 
 ## Production
 
-Run `cargo tauri build` to build a production binary and any applicable installers or bundles for the current platform.
+Run `cargo tauri build` to build a production binary and any applicable installers or bundles for the current platform. Note that `cargo build --release` will not produce a useful binary as it does not embed the web pages into the application.
